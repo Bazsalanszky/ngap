@@ -12,76 +12,81 @@ import (
 	"github.com/omec-project/ngap/v2/ngapType"
 )
 
+// IPAddressToString decodes a TransportLayerAddress into its IPv4 and/or IPv6
+// text form. As described in TS 38.414 clause 5.1, the address is 32 bits
+// (IPv4), 128 bits (IPv6) or 160 bits (IPv4 in the first 32 bits followed by
+// IPv6). Any other bit length, or a byte slice whose length does not match the
+// bit length, is malformed and yields two empty strings.
 func IPAddressToString(ipAddr ngapType.TransportLayerAddress) (ipv4Addr, ipv6Addr string) {
 	ip := ipAddr.Value
 
-	// Described in 38.414
 	switch ip.BitLength {
 	case 32: // ipv4
-		netIP := net.IPv4(ip.Bytes[0], ip.Bytes[1], ip.Bytes[2], ip.Bytes[3])
-		ipv4Addr = netIP.String()
+		if !hasByteLength(ip, net.IPv4len) {
+			return "", ""
+		}
+		ipv4Addr = net.IP(ip.Bytes).String()
 	case 128: // ipv6
-		netIP := net.IP{}
-		for i := range ip.Bytes {
-			netIP = append(netIP, ip.Bytes[i])
+		if !hasByteLength(ip, net.IPv6len) {
+			return "", ""
 		}
-		ipv6Addr = netIP.String()
+		ipv6Addr = net.IP(ip.Bytes).String()
 	case 160: // ipv4 + ipv6, and ipv4 is contained in the first 32 bits
-		netIPv4 := net.IPv4(ip.Bytes[0], ip.Bytes[1], ip.Bytes[2], ip.Bytes[3])
-		netIPv6 := net.IP{}
-		for i := range ip.Bytes {
-			netIPv6 = append(netIPv6, ip.Bytes[i+4])
+		if !hasByteLength(ip, net.IPv4len+net.IPv6len) {
+			return "", ""
 		}
-		ipv4Addr = netIPv4.String()
-		ipv6Addr = netIPv6.String()
+		ipv4Addr = net.IP(ip.Bytes[:net.IPv4len]).String()
+		ipv6Addr = net.IP(ip.Bytes[net.IPv4len:]).String()
+	default:
+		logger.NgapLog.Warnf("IPAddressToString: unsupported TransportLayerAddress bit length %d", ip.BitLength)
 	}
-	return
+	return ipv4Addr, ipv6Addr
 }
 
+func hasByteLength(ip aper.BitString, want int) bool {
+	if len(ip.Bytes) != want {
+		logger.NgapLog.Warnf("IPAddressToString: TransportLayerAddress of %d bits carries %d bytes, want %d",
+			ip.BitLength, len(ip.Bytes), want)
+		return false
+	}
+	return true
+}
+
+// IPAddressToNgap encodes an IPv4 and/or IPv6 address as a TransportLayerAddress
+// (TS 38.414 clause 5.1): 32 bits for IPv4 only, 128 bits for IPv6 only and
+// 160 bits when both are given. If either non-empty string is not a valid
+// address of its family, or both are empty, the zero TransportLayerAddress is
+// returned and a warning is logged.
 func IPAddressToNgap(ipv4Addr, ipv6Addr string) ngapType.TransportLayerAddress {
-	var ipAddr ngapType.TransportLayerAddress
+	var ipBytes []byte
 
-	switch {
-	case ipv4Addr != "" && ipv6Addr != "":
-		// Both ipv4 & ipv6
+	if ipv4Addr != "" {
 		ipv4NetIP := net.ParseIP(ipv4Addr).To4()
-		ipv6NetIP := net.ParseIP(ipv6Addr).To16()
-
-		ipBytes := []byte{ipv4NetIP[0], ipv4NetIP[1], ipv4NetIP[2], ipv4NetIP[3]}
-		for _, byteTmp := range ipv6NetIP[:16] {
-			ipBytes = append(ipBytes, byteTmp)
+		if ipv4NetIP == nil {
+			logger.NgapLog.Warnf("IPAddressToNgap: invalid IPv4 address %q", ipv4Addr)
+			return ngapType.TransportLayerAddress{}
 		}
-
-		ipAddr.Value = aper.BitString{
-			Bytes:     ipBytes,
-			BitLength: 160,
-		}
-	case ipv4Addr != "" && ipv6Addr == "":
-		// ipv4
-		ipv4NetIP := net.ParseIP(ipv4Addr).To4()
-
-		ipBytes := []byte{ipv4NetIP[0], ipv4NetIP[1], ipv4NetIP[2], ipv4NetIP[3]}
-
-		ipAddr.Value = aper.BitString{
-			Bytes:     ipBytes,
-			BitLength: 32,
-		}
-	case ipv4Addr == "" && ipv6Addr != "":
-		// ipv6
-		ipv6NetIP := net.ParseIP(ipv6Addr).To16()
-
-		ipBytes := []byte{}
-		for _, byteTmp := range ipv6NetIP[:16] {
-			ipBytes = append(ipBytes, byteTmp)
-		}
-
-		ipAddr.Value = aper.BitString{
-			Bytes:     ipBytes,
-			BitLength: 128,
-		}
-	default:
-		logger.NgapLog.Warnln("IPAddressToNgap: Both ipv4 and ipv6 are empty string")
+		ipBytes = append(ipBytes, ipv4NetIP...)
 	}
 
-	return ipAddr
+	if ipv6Addr != "" {
+		ipv6NetIP := net.ParseIP(ipv6Addr).To16()
+		if ipv6NetIP == nil {
+			logger.NgapLog.Warnf("IPAddressToNgap: invalid IPv6 address %q", ipv6Addr)
+			return ngapType.TransportLayerAddress{}
+		}
+		ipBytes = append(ipBytes, ipv6NetIP...)
+	}
+
+	if len(ipBytes) == 0 {
+		logger.NgapLog.Warnln("IPAddressToNgap: Both ipv4 and ipv6 are empty string")
+		return ngapType.TransportLayerAddress{}
+	}
+
+	return ngapType.TransportLayerAddress{
+		Value: aper.BitString{
+			Bytes:     ipBytes,
+			BitLength: uint64(len(ipBytes) * 8),
+		},
+	}
 }
